@@ -1,8 +1,8 @@
-import {chartData,indexLog,readSampleWindow,visitSeries} from './parser.js';
+import {chartData,indexLog,readSampleWindow,readFrameStep,visitSeries} from './parser.js';
 import {spectrum} from './spectrum.js';
 
 let log;
-const revisions={open:0,chart:0,replay:0,spectrum:0,csv:0};
+const revisions={open:0,chart:0,replay:0,frame:0,spectrum:0,csv:0};
 const send=(type,id,data,transfer=[])=>self.postMessage({type,id,data},transfer);
 const quote=value=>'"'+String(value??'').replaceAll('"','""')+'"';
 
@@ -27,9 +27,14 @@ self.onmessage = async ({data:message}) => {
       if (!cancelled()) send(type,id,result,result.map(d=>d.points.buffer));
     }
     if (type==='replay') {
-      const {bucket,series,start,end}=message;
+      const {bucket,key,series,start,end}=message;
       const result=await readSampleWindow(log,series,start,end,cancelled);
-      if (!cancelled()) send(type,id,{bucket,start,end,series:result},result.map(d=>d.points.buffer));
+      if (!cancelled()) send(type,id,{bucket,key,start,end,series:result},result.map(d=>d.points.buffer));
+    }
+    if (type==='frame') {
+      const {signal,time,direction,count,scope}=message;
+      const target=await readFrameStep(log,signal,time,direction,count,scope,cancelled);
+      if (!cancelled()) send(type,id,{target});
     }
     if (type==='spectrum') {
       const result=await spectrum(log,message.series,message.start,message.end,cancelled);

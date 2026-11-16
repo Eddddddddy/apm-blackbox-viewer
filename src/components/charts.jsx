@@ -73,7 +73,7 @@ function draw(canvas, row, points, domain, axis) {
     ctx.beginPath(); ctx.moveTo(px,top); ctx.lineTo(px,bottom); ctx.stroke();
     if (axis) {
       ctx.textAlign=px<left+20?'left':px>left+width-20?'right':'center';
-      const label=axis==='frequency'?`${Math.round(t)} Hz`:timeLabel(t,xStep<1?2:b-a<25?1:0);
+      const label=axis==='frequency'?`${Math.round(t)} Hz`:timeLabel(t,xStep<1?clamp(Math.ceil(-Math.log10(xStep))+1,2,6):b-a<25?1:0);
       ctx.fillText(label,px,bottom+14);
     }
   }

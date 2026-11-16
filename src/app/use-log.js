@@ -8,6 +8,7 @@ export function useLog() {
   const [file,setFile]=useState(null),[meta,setMeta]=useState(null),[progress,setProgress]=useState(null);
   const [points,setPoints]=useState({}),[chartBusy,setChartBusy]=useState(false);
   const [replayWindows,setReplayWindows]=useState([]),[replayError,setReplayError]=useState(false);
+  const [frameResult,setFrameResult]=useState(null);
   const [frequency,setFrequency]=useState(null),[frequencyBusy,setFrequencyBusy]=useState(false);
   const [csvBusy,setCsvBusy]=useState(false),[error,setError]=useState(null);
   useEffect(()=>{
@@ -23,8 +24,9 @@ export function useLog() {
       if(msg.type==='replay') {
         const {series,...range}=value;
         const points=Object.fromEntries(series.map(d=>[d.id,d.points]));
-        setReplayWindows(current=>[{...range,points},...current.filter(w=>w.bucket!==range.bucket)].slice(0,3));
+        setReplayWindows(current=>[{...range,points},...current.filter(w=>w.bucket!==range.bucket||w.key!==range.key)].slice(0,3));
       }
+      if(msg.type==='frame') setFrameResult({id:msg.id,...value});
       if(msg.type==='spectrum') {setFrequency(value);setFrequencyBusy(false);}
       if(msg.type==='csv') {
         setCsvBusy(false);
@@ -35,6 +37,7 @@ export function useLog() {
       }
       if(msg.type==='error') {
         if(type==='replay') {setReplayError(true);return;}
+        if(type==='frame') setFrameResult({id:msg.id,target:null});
         setError(value.message);
         if(type==='open') setProgress(null);
         if(type==='chart') setChartBusy(false);
@@ -55,6 +58,7 @@ export function useLog() {
     const id=++ids.current;
     requests.current[type]=id;
     worker.current?.postMessage({type,id,...data});
+    return id;
   }
   function open(next,demo=false) {
     if(!next) return;
@@ -62,16 +66,17 @@ export function useLog() {
     requests.current={};
     fileName.current=next.name;
     setFile({name:next.name,size:next.size,demo});
-    setMeta(null);setPoints({});setFrequency(null);setReplayWindows([]);setReplayError(false);
+    setMeta(null);setPoints({});setFrequency(null);setReplayWindows([]);setReplayError(false);setFrameResult(null);
     setProgress(0);setError(null);setChartBusy(false);setFrequencyBusy(false);setCsvBusy(false);
     request('open',{file:next});
   }
   return {
-    file,meta,progress,points,chartBusy,replayWindows,replayError,frequency,frequencyBusy,csvBusy,error,open,clear:()=>setError(null),
-    replay:(series,bucket,duration)=>{
+    file,meta,progress,points,chartBusy,replayWindows,replayError,frameResult,frequency,frequencyBusy,csvBusy,error,open,clear:()=>setError(null),
+    replay:(series,key,bucket,duration)=>{
       setReplayError(false);
-      request('replay',{series,bucket,start:Math.max(0,bucket-1.5),end:Math.min(duration,bucket+REPLAY_CHUNK+1)});
+      request('replay',{series,key,bucket,start:Math.max(0,bucket-1.5),end:Math.min(duration,bucket+REPLAY_CHUNK+1)});
     },
+    findFrame:(signal,time,direction,count,scope)=>request('frame',{signal,time,direction,count,scope}),
     chart:(series,start,end,pixels)=>{setChartBusy(true);request('chart',{series,start,end,pixels});},
     fft:(series,start,end)=>{setFrequencyBusy(true);setFrequency(null);setError(null);request('spectrum',{series,start,end});},
     csv:(series,start,end)=>{setCsvBusy(true);setError(null);request('csv',{series,start,end});}

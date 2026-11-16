@@ -1,4 +1,5 @@
 import {normalizedStick} from '../replay/rc-sticks.js';
+import {frameStep} from '../replay/frame-navigation.js';
 
 // DataFlash record layouts are declared by FMT records in each file.
 const WIDTH = { b:1, B:1, h:2, H:2, i:4, I:4, q:8, Q:8, f:4, d:8, g:2, c:2, C:2, e:4, E:4, L:4, M:1, n:4, N:16, Z:64, a:64 };
@@ -329,4 +330,21 @@ export async function readSampleWindow(log, series, start, end, cancelled) {
     ordered.forEach(([t,v],j)=>{points[j*2]=t;points[j*2+1]=v;});
     return {id:signal.id,points};
   });
+}
+
+export async function readFrameStep(log,signal,time,direction,count,scope,cancelled=()=>false) {
+  const limit=scope[direction>0?1:0];
+  let target=null,edge=time,width=2,remaining=count;
+  while(!cancelled()&&remaining>0&&(limit-edge)*direction>0){
+    const next=direction>0?Math.min(limit,edge+width):Math.max(limit,edge-width);
+    const [record]=await readSampleWindow(log,[signal],Math.min(edge,next),Math.max(edge,next),cancelled);
+    const step=frameStep(record.points,edge,direction,remaining,scope);
+    if(step.count){
+      target=step.time;
+      remaining-=step.count;
+    }
+    edge=next;
+    width=Math.min(30,width*2);
+  }
+  return target;
 }

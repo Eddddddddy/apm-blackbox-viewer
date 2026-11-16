@@ -28,7 +28,7 @@ function wrappedDelta(value) {
   return ((value+180)%360+360)%360-180;
 }
 
-export function sampleAt(points,time,angle=false) {
+export function sampleAt(points,time,angle=false,maxAge=.35) {
   if(!points?.length)return undefined;
   let lo=0,hi=points.length/2;
   while(lo<hi){
@@ -37,7 +37,7 @@ export function sampleAt(points,time,angle=false) {
   }
   if(!lo)return undefined;
   const p=(lo-1)*2,start=points[p],value=points[p+1];
-  if(time-start>0.35)return undefined;
+  if(time-start>maxAge)return undefined;
   if(!angle||lo===points.length/2)return value;
   const next=points[p+2], gap=next-start;
   if(gap>0.35 || gap<=0)return value;

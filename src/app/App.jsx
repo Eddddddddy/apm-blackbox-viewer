@@ -7,6 +7,7 @@ import {
 import {Plot,ModeStrip,PADDING,clamp,fmt,nearest,timeLabel} from '../components/charts.jsx';
 import {available,COLORS,customSignals,gyroSignals,mapMotorSignal,motorChannels,PRESETS} from '../replay/signals.js';
 import {craftConfig,sampleAt} from '../replay/craft-data.js';
+import {frameSignal,frameStep} from '../replay/frame-navigation.js';
 import {CraftPreview} from '../components/CraftPreview.jsx';
 import {normalizedStick,rcStickConfig,stickChart,stickPercent} from '../replay/rc-sticks.js';
 import {StickPreview} from '../components/StickPreview.jsx';
@@ -17,6 +18,7 @@ const TABS=[
   ['overview','飞行概览',Activity],['tuning','姿态与 PID',SlidersHorizontal],['navigation','视觉与定位',Crosshair],
   ['power','动力与振动',Gauge],['spectrum','频谱',AudioLines],['events','事件',ListFilter],['params','参数',FileText]
 ];
+const FRAME_STEPS=[1,5,10,25,50,100,400];
 const EMPTY=[];
 const EMPTY_OVERVIEW={overview:EMPTY,flights:EMPTY,catalog:EMPTY,events:EMPTY,params:EMPTY};
 const sizeLabel=n=>n>=1e9?`${(n/1e9).toFixed(2)} GB`:`${(n/1e6).toFixed(1)} MB`;
@@ -35,7 +37,7 @@ function Sidebar({events,scope,cursor,seek,duration,craft,replayWindow,craftPend
   return <aside className="sidebar">
     <section className="side-section cursor-box">
       <div className="side-heading"><Crosshair size={15}/><h2>播放头</h2></div>
-      <div className="cursor-time">{timeLabel(cursor,3)}</div>
+      <div className="cursor-time">{timeLabel(cursor,4)}</div>
       <div className="cursor-description">日志时间 <span>／</span> {timeLabel(duration,1)}</div>
       <div className="readout"><span>飞行模式</span><strong>{mode?.name??'—'}</strong></div>
       <div className="readout"><span>电机状态</span><strong className={arm?.value?'armed':''}>{arm?arm.value?'已解锁':'已上锁':'—'}</strong></div>
@@ -60,14 +62,19 @@ function Sidebar({events,scope,cursor,seek,duration,craft,replayWindow,craftPend
   </aside>;
 }
 
-function Playback({meta,scope,domain,cursor,playing,speed,setSpeed,toggle,seek,goToFlight}) {
+function Playback({meta,scope,domain,cursor,playing,speed,setSpeed,toggle,seek,goToFlight,clock,stepSize,setStepSize,step}) {
   return <section className="playback" aria-label="日志播放">
     <div className="player-controls">
       <div className="transport">
-        <IconButton icon={StepBack} label="后退 0.25 秒" onClick={()=>seek(cursor-.25)}/>
+        <IconButton icon={StepBack} label={`后退 ${stepSize} 帧`} onClick={()=>step(-1)} disabled={!clock}/>
         <IconButton icon={playing?Pause:Play} label={playing?'暂停':'播放'} onClick={toggle} className="play-button"/>
-        <IconButton icon={StepForward} label="前进 0.25 秒" onClick={()=>seek(cursor+.25)}/>
-        <span className="player-time">{timeLabel(cursor,2)} <span>/ {timeLabel(meta.duration,1)}</span></span>
+        <IconButton icon={StepForward} label={`前进 ${stepSize} 帧`} onClick={()=>step(1)} disabled={!clock}/>
+        <label className="select-wrap step-select" title={clock?`按 ${clock.type} 的记录时间步进`:'此日志没有可逐帧步进的时间序列'}>
+          <span>步长</span><select aria-label="步进帧数" value={stepSize} disabled={!clock} onChange={e=>setStepSize(Number(e.target.value))}>
+            {FRAME_STEPS.map(count=><option key={count} value={count}>{count} 帧</option>)}
+          </select><ChevronDown size={14}/>
+        </label>
+        <span className="player-time">{timeLabel(cursor,4)} <span>/ {timeLabel(meta.duration,1)}</span></span>
       </div>
       <div className="transport-end">
         <label className="select-wrap rate-select"><select aria-label="播放速度" value={speed} onChange={e=>setSpeed(Number(e.target.value))}>
@@ -78,7 +85,7 @@ function Playback({meta,scope,domain,cursor,playing,speed,setSpeed,toggle,seek,g
     <TimelineTrack meta={meta} scope={scope} domain={domain} cursor={cursor} seek={seek} goToFlight={goToFlight}/>
     <div className="seek-row">
       <span>{timeLabel(scope[0],1)}</span>
-      <input type="range" aria-label="播放进度" min={scope[0]} max={scope[1]} step="0.01" value={cursor} onChange={e=>seek(Number(e.target.value))}/>
+      <input type="range" aria-label="播放进度" min={scope[0]} max={scope[1]} step="any" value={cursor} onChange={e=>seek(Number(e.target.value))}/>
       <span>{timeLabel(scope[1],1)}</span>
     </div>
   </section>;
@@ -171,12 +178,13 @@ function SpectrumPanel({meta,log,cursor,scope}) {
 export function App() {
   const log=useLog(),meta=log.meta;
   const {duration=0,flights,catalog,events}=meta??EMPTY_OVERVIEW;
-  const input=useRef(null),plotArea=useRef(null),drag=useRef(null),cursorRef=useRef(0),dropDepth=useRef(0);
+  const input=useRef(null),plotArea=useRef(null),drag=useRef(null),cursorRef=useRef(0),pendingFrame=useRef(null),dropDepth=useRef(0);
   const [tab,setTab]=useState('overview'),[selection,setSelection]=useState(-1),[domain,setDomain]=useState([0,1]);
   const [cursor,setCursor]=useState(0),[hover,setHover]=useState(null),[speed,setSpeed]=useState(1),[playing,setPlaying]=useState(false);
   const [custom,setCustom]=useState([]),[picker,setPicker]=useState(false),[dropping,setDropping]=useState(false);
   const [graphWidth,setGraphWidth]=useState(1000);
-  const [stickMode,setStickMode]=useState(2);
+  const [stickMode,setStickMode]=useState(2),[stepSize,setStepSize]=useState(1);
+  const [brush,setBrush]=useState(null);
   const selectedFlight=flights[selection];
   const scope=useMemo(()=>selectedFlight?[selectedFlight.start,selectedFlight.end]:[0,duration],[duration,selectedFlight]);
   const timelineTab=tab in PRESETS||tab==='custom';
@@ -184,23 +192,17 @@ export function App() {
   const craft=useMemo(()=>meta?craftConfig(meta,motorMap):null,[meta,motorMap]);
   const rcSticks=useMemo(()=>meta?rcStickConfig(meta):null,[meta]);
   const stickRow=useMemo(()=>tab==='overview'?stickChart(rcSticks,stickMode):null,[tab,rcSticks,stickMode]);
-  const replaySeries=useMemo(()=>[...(craft?.series??EMPTY),...(rcSticks?.series??EMPTY)],[craft,rcSticks]);
-  const replayBucket=Math.floor((clamp(cursor,0,duration)+.75)/REPLAY_CHUNK)*REPLAY_CHUNK;
-  const replayWindow=log.replayWindows.find(w=>cursor>=w.start&&cursor<=w.end);
-  useEffect(()=>{
-    if(replaySeries.length&&!log.replayWindows.some(w=>w.bucket===replayBucket)) log.replay(replaySeries,replayBucket,duration);
-  },[replaySeries,replayBucket,duration]);
-  const replayPending=Boolean(!replayWindow&&!log.replayError);
   const timeAt=useCallback((event,view=domain)=>{
     const box=plotArea.current.getBoundingClientRect();
     return view[0]+clamp((event.clientX-box.left-PADDING.left)/(box.width-PADDING.left-PADDING.right),0,1)*(view[1]-view[0]);
   },[domain]);
-  function jump(t) {cursorRef.current=t;setCursor(t);}
+  const jump=useCallback(t=>{pendingFrame.current=null;cursorRef.current=t;setCursor(t);},[]);
   const goToFlight=useCallback((id,t)=>{
     const f=flights[id], next=f?[f.start,f.end]:[0,duration];
-    setSelection(id);setPlaying(false);setDomain(next);setHover(null);
+    drag.current=null;
+    setBrush(null);setSelection(id);setPlaying(false);setDomain(next);setHover(null);
     jump(clamp(t??f?.takeoff??next[0],...next));
-  },[flights,duration]);
+  },[flights,duration,jump]);
   useEffect(()=>{
     setPlaying(false);
     setCustom([]);
@@ -218,10 +220,10 @@ export function App() {
       const at=clamp(end-span/2,scope[0],Math.max(scope[0],scope[1]-span));
       setDomain([at,at+span]);
     }
-  },[scope,domain,goToFlight]);
+  },[scope,domain,goToFlight,jump]);
   function nextView(amount,anchor=(domain[0]+domain[1])/2) {
     const span=domain[1]-domain[0],total=scope[1]-scope[0];
-    const width=clamp(span*amount,Math.min(.25,total),total);
+    const width=clamp(span*amount,Math.min(.0001,total),total);
     const at=clamp(anchor-(anchor-domain[0])*width/span,scope[0],scope[1]-width);
     setDomain([at,at+width]);setHover(null);
   }
@@ -245,22 +247,6 @@ export function App() {
     frame=requestAnimationFrame(tick);
     return()=>cancelAnimationFrame(frame);
   },[playing,speed,scope,seek]);
-  useEffect(()=>{
-    const key=e=>{
-      if(e.repeat&&e.code==='Space')return;
-      if(picker||e.target.closest?.('input,select,textarea,button,dialog,[contenteditable]')||e.metaKey||e.ctrlKey||e.altKey)return;
-      if(e.key.toLowerCase()==='o'){input.current.click();return;}
-      if(!meta)return;
-      if(e.code==='Space'){e.preventDefault();toggle();}
-      if(e.key==='ArrowLeft'||e.key==='ArrowRight'){e.preventDefault();seek(cursorRef.current+(e.key==='ArrowLeft'?-.25:.25));}
-      if(e.key==='+'||e.key==='=')zoom(.66);
-      if(e.key==='-')zoom(1.5);
-      if(e.key.toLowerCase()==='f')fit();
-      if(e.key.toLowerCase()==='a')setTab(x=>x==='spectrum'?'overview':'spectrum');
-    };
-    window.addEventListener('keydown',key);
-    return()=>window.removeEventListener('keydown',key);
-  },[meta,toggle,seek,zoom,fit,picker]);
   const rows=useMemo(()=>{
     if(tab==='custom'){
       const grouped=Object.groupBy(custom.map((s,i)=>({...s,color:COLORS[i%COLORS.length]})),s=>s.unit||'无单位');
@@ -271,6 +257,67 @@ export function App() {
     return preset.filter(row=>row.series.length);
   },[tab,custom,catalog,motorMap,stickRow]);
   const signals=useMemo(()=>[...new Map(rows.flatMap(r=>r.series).map(s=>[s.id,s])).values()],[rows]);
+
+  const clock=useMemo(()=>frameSignal(catalog),[catalog]);
+  const replaySeries=useMemo(()=>{
+    const byId=new Map(signals.map(({rcAxis,...signal})=>[signal.id,signal]));
+    for(const signal of [...(craft?.series??EMPTY),...(rcSticks?.series??EMPTY),...(clock?[clock]:EMPTY)]) byId.set(signal.id,signal);
+    return [...byId.values()];
+  },[signals,craft,rcSticks,clock]);
+  const replayKey=useMemo(()=>JSON.stringify(replaySeries.map(({id,type,field,instance})=>[id,type,field,instance]).sort()),[replaySeries]);
+  const replayBucket=Math.floor((clamp(cursor,0,duration)+.75)/REPLAY_CHUNK)*REPLAY_CHUNK;
+  const replayWindow=log.replayWindows.find(w=>cursor>=w.start&&cursor<=w.end);
+  const legendWindow=log.replayWindows.find(w=>w.key===replayKey&&cursor>=w.start&&cursor<=w.end);
+  const replayPending=Boolean(!replayWindow&&!log.replayError);
+  useEffect(()=>{
+    if(replaySeries.length&&!log.replayWindows.some(w=>w.key===replayKey&&w.bucket===replayBucket)) {
+      log.replay(replaySeries,replayKey,replayBucket,duration);
+    }
+  },[replaySeries,replayKey,replayBucket,duration]);
+
+  const step=direction=>{
+    if(!clock)return;
+    setPlaying(false);
+    setHover(null);
+    const from=cursorRef.current;
+    const pending=pendingFrame.current;
+    const count=pending?.direction===direction?pending.count+stepSize:stepSize;
+    const buffer=log.replayWindows.find(w=>from>=w.start&&from<=w.end&&w.points[clock.id]);
+    const target=frameStep(buffer?.points[clock.id],from,direction,count,scope);
+    const coversEdge=buffer&&(direction<0?buffer.start<=scope[0]:buffer.end>=scope[1]);
+    if(target.count===count||coversEdge){
+      pendingFrame.current=null;
+      if(target.time!=null)seek(target.time);
+      return;
+    }
+    pendingFrame.current={id:log.findFrame(clock,from,direction,count,scope),direction,count};
+  };
+  useEffect(()=>{
+    if(!log.frameResult||log.frameResult.id!==pendingFrame.current?.id)return;
+    pendingFrame.current=null;
+    if(log.frameResult.target!=null)seek(log.frameResult.target);
+  },[log.frameResult,seek]);
+  useEffect(()=>{
+    const key=e=>{
+      if(picker||e.defaultPrevented||e.metaKey||e.ctrlKey||e.altKey
+        ||e.target.closest?.('select,textarea,dialog,[contenteditable],input:not([type="range"])'))return;
+      if(meta&&(e.key==='ArrowLeft'||e.key==='ArrowRight')){
+        e.preventDefault();
+        step(e.key==='ArrowLeft'?-1:1);
+        return;
+      }
+      if(e.target.closest?.('button,input')||(e.repeat&&e.code==='Space'))return;
+      if(e.key.toLowerCase()==='o'){input.current.click();return;}
+      if(!meta)return;
+      if(e.code==='Space'){e.preventDefault();toggle();}
+      if(e.key==='+'||e.key==='=')zoom(.66);
+      if(e.key==='-')zoom(1.5);
+      if(e.key.toLowerCase()==='f')fit();
+      if(e.key.toLowerCase()==='a')setTab(x=>x==='spectrum'?'overview':'spectrum');
+    };
+    window.addEventListener('keydown',key);
+    return()=>window.removeEventListener('keydown',key);
+  });
 
   useEffect(()=>{
     const node=plotArea.current;
@@ -303,46 +350,61 @@ export function App() {
   },[timelineTab,meta,domain,zoom,scope,timeAt]);
 
   const pointerDown=e=>{
-    if(e.button!==0||e.target.closest('button'))return;
+    if(e.button!==0||e.target.closest('button')||drag.current)return;
+    e.currentTarget.parentElement.focus({preventScroll:true});
     e.currentTarget.setPointerCapture(e.pointerId);
-    drag.current={x:e.clientX,domain,range:e.shiftKey,anchor:timeAt(e),moved:false};
+    drag.current={id:e.pointerId,x:e.clientX,domain,pan:e.shiftKey,anchor:timeAt(e),moved:false};
+    setHover(null);
   };
   const pointerMove=e=>{
-    if(e.target.closest('button'))return;
     const current=drag.current;
     if(!current){setHover(timeAt(e));return;}
+    if(current.id!==e.pointerId)return;
     const d=e.clientX-current.x;
     if(Math.abs(d)<4&&!current.moved)return;
     current.moved=true;
-    if(current.range){setHover(timeAt(e));return;}
-    const w=current.domain[1]-current.domain[0], p=plotArea.current.clientWidth-PADDING.left-PADDING.right;
+    if(!current.pan){
+      const t=timeAt(e,current.domain);
+      setBrush([Math.min(t,current.anchor),Math.max(t,current.anchor)]);
+      return;
+    }
+    const w=current.domain[1]-current.domain[0],p=plotArea.current.clientWidth-PADDING.left-PADDING.right;
     const a=clamp(current.domain[0]-d*w/p,scope[0],scope[1]-w);
-    setDomain([a,a+w]);setHover(null);
+    setDomain([a,a+w]);
+  };
+  const clearDrag=e=>{
+    if(e.pointerId!==drag.current?.id)return;
+    drag.current=null;
+    setBrush(null);
   };
   const pointerUp=e=>{
-    if(!drag.current)return;
-    const {moved,range,anchor}=drag.current;
-    drag.current=null;
+    if(e.pointerId!==drag.current?.id)return;
+    const {moved,pan,anchor,domain:view}=drag.current;
+    clearDrag(e);
     if(!moved){seek(timeAt(e));return;}
-    if(!range)return;
-    const t=timeAt(e);
-    if(Math.abs(t-anchor)>=.25){setDomain([Math.min(t,anchor),Math.max(t,anchor)]);setHover(null);}
+    if(pan)return;
+    const t=timeAt(e,view),start=Math.min(t,anchor),end=Math.max(t,anchor);
+    if(end<=start)return;
+    setPlaying(false);
+    setDomain([start,end]);
+    if(cursorRef.current<start||cursorRef.current>end)jump(start);
   };
   const openFiles=files=>{if(files?.[0])log.open(files[0]);};
   const ratio=t=>(t-domain[0])/(domain[1]-domain[0]);
-  const valueAt=hover??(cursor>=domain[0]&&cursor<=domain[1]?cursor:NaN);
   function legendValue(signal) {
-    const motor=signal.motor!=null&&signal.field==='RPM';
+    const points=legendWindow?.points[signal.id];
+    if(hover!=null||!points?.length) {
+      return {value:nearest(log.points[signal.id],hover??cursor),source:'最近绘制样本'};
+    }
     const attitude=signal.type===craft?.attitudeType&&['Roll','Pitch','Yaw'].includes(signal.field);
-    const key=motor?'M'+(signal.motor+1):attitude?signal.field:signal.rcAxis?signal.id:null;
-    const exact=hover==null&&key&&replayWindow;
-    const sample=exact?sampleAt(replayWindow.points[key],valueAt,attitude):nearest(log.points[signal.id],valueAt);
+    const sample=sampleAt(points,cursor,attitude,(attitude||signal.rcAxis)?0.35:Infinity);
     return {
-      value:exact&&signal.rcAxis?normalizedStick(signal.rcAxis,sample)?.percent:sample,
-      source:exact?'播放头样本':'最近绘制样本'
+      value:signal.rcAxis?normalizedStick(signal.rcAxis,sample)?.percent:sample,
+      source:'播放头样本'
     };
   }
   const plotOverlay=t=>({left:`calc(${PADDING.left}px + (100% - ${PADDING.left+PADDING.right}px) * ${ratio(t)})`});
+  const viewDigits=clamp(Math.ceil(-Math.log10(domain[1]-domain[0]))+1,1,6);
   const allTimesValid=Number.isFinite(duration)&&duration>0&&domain[1]>domain[0];
 
   return <div className="app" onDragEnter={e=>{if(e.dataTransfer.types.includes('Files')){e.preventDefault();dropDepth.current++;setDropping(true);}}}
@@ -380,7 +442,7 @@ export function App() {
               {custom.length>0&&<button type="button" className={tab==='custom'?'tab active':'tab'} aria-pressed={tab==='custom'} onClick={()=>setTab('custom')}><ListFilter size={15}/>自定义</button>}
             </nav>
             {timelineTab&&<>
-              <div className="plot-toolbar"><div className="view-readout"><span className="view-name">{PRESETS[tab]?.name??'自定义'}</span><span className="range-label">{shortTime(domain[0])} – {shortTime(domain[1])}</span>
+              <div className="plot-toolbar"><div className="view-readout"><span className="view-name">{PRESETS[tab]?.name??'自定义'}</span><span className="range-label">{timeLabel(domain[0],viewDigits)} – {timeLabel(domain[1],viewDigits)}</span>
                 {log.chartBusy&&<span className="loading-dot" role="status" aria-label="正在更新数据"/>}</div>
                 <div className="graph-actions">
                   <IconButton icon={Minus} label="缩小时间轴" onClick={()=>zoom(1.5)}/><IconButton icon={Plus} label="放大时间轴" onClick={()=>zoom(.66)}/>
@@ -391,7 +453,7 @@ export function App() {
                 </div>
               </div>
               {rows.length>0?<div className="plot-scroll" tabIndex={0} aria-label="日志曲线区"><div className={'plot-area'+(stickRow?' has-stick-traces':'')} ref={plotArea} onPointerDown={pointerDown} onPointerMove={pointerMove} onPointerUp={pointerUp}
-                onPointerLeave={()=>{if(!drag.current)setHover(null);}} onLostPointerCapture={()=>{drag.current=null;}}>
+                onPointerLeave={()=>{if(!drag.current)setHover(null);}} onPointerCancel={clearDrag} onLostPointerCapture={clearDrag}>
                 <div className="flight-stripe"><ModeStrip events={events} start={domain[0]} end={domain[1]}/></div>
                 {rows.map((r,i)=><article key={r.title} className="graph-row">
                   <div className="graph-head"><h2>{r.title}<span>{r.note}</span></h2><div className="line-legend">
@@ -404,9 +466,10 @@ export function App() {
                   <Plot row={r} points={log.points} domain={domain} axis={i===rows.length-1?'timeOnly':''}/>
                 </article>)}
                 {cursor>=domain[0]&&cursor<=domain[1]&&<span className="plot-head" style={plotOverlay(cursor)}/>}
-                {hover!=null&&<span className="plot-hover" style={plotOverlay(hover)}><span>{timeLabel(hover,2)}</span></span>}
+                {hover!=null&&<span className="plot-hover" style={plotOverlay(hover)}><span>{timeLabel(hover,Math.max(2,viewDigits))}</span></span>}
+                {brush&&brush[0]<brush[1]&&<span className="plot-selection" style={{...plotOverlay(brush[0]),width:`calc((100% - ${PADDING.left+PADDING.right}px) * ${ratio(brush[1])-ratio(brush[0])})`}}/>}
               </div></div>:<div className="blank-state"><Activity size={27}/><p>这份日志没有当前视图需要的信号。</p><button className="button secondary" onClick={()=>setPicker(true)}>选择其他信号</button></div>}
-              <div className="plot-footer"><span>滚轮缩放 · 拖动平移 · Shift + 拖动框选</span>{meta.skipped>0&&<span title="解析时跳过无法识别的字节，可能来自断电时未写完的最后一条记录。">跳过 {meta.skipped.toLocaleString()} 字节</span>}</div>
+              <div className="plot-footer"><span>横向拖动框选 · Shift + 拖动平移 · 滚轮缩放</span>{meta.skipped>0&&<span title="解析时跳过无法识别的字节，可能来自断电时未写完的最后一条记录。">跳过 {meta.skipped.toLocaleString()} 字节</span>}</div>
             </>}
             {tab==='spectrum'&&<SpectrumPanel meta={meta} log={log} cursor={cursor} scope={scope}/>}
             {(tab==='events'||tab==='params')&&<RecordTable key={tab} type={tab} meta={meta} scope={scope} seek={seek}/>}
@@ -415,7 +478,8 @@ export function App() {
           </div>
           <Sidebar events={events} scope={scope} cursor={cursor} seek={seek} duration={duration} craft={craft} replayWindow={replayWindow} craftPending={replayPending&&craft.series.length>0}/>
         </div>
-        <Playback meta={meta} scope={scope} domain={domain} cursor={cursor} playing={playing} speed={speed} setSpeed={setSpeed} toggle={toggle} seek={seek} goToFlight={goToFlight}/>
+        <Playback meta={meta} scope={scope} domain={domain} cursor={cursor} playing={playing} speed={speed} setSpeed={setSpeed} toggle={toggle} seek={seek} goToFlight={goToFlight}
+          clock={clock} stepSize={stepSize} setStepSize={size=>{pendingFrame.current=null;setStepSize(size);}} step={step}/>
       </>}
     </main>
     {picker&&meta&&<SignalPicker catalog={catalog} selected={custom} onChange={setCustom} onClose={()=>{setPicker(false);if(custom.length)setTab('custom');}}/>}
