@@ -1,0 +1,15 @@
+node_modules/
+dist/
+coverage/
+
+.DS_Store
+.env
+.env.*
+.openai/
+*.local
+
+*[.][Bb][Ii][Nn]
+*[.][Ll][Oo][Gg]
+*[.][Tt][Ll][Oo][Gg]
+*[.][Pp][Aa][Rr][Aa][Mm]
+*-trace.csv

@@ -1,0 +1,24 @@
+{
+  "name": "apm-blackbox-viewer",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "lucide-react": "^0.468.0",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1"
+  },
+  "devDependencies": {
+    "vite": "^7.1.2"
+  },
+  "description": "Browser-based ArduPilot DataFlash log viewer for quadcopters.",
+  "engines": {
+    "node": "^22.12.0 || >=24.0.0"
+  }
+}
